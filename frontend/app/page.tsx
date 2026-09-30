@@ -1,5 +1,4 @@
 "use client";
-
 import {
   useCallback,
   useEffect,
@@ -16,8 +15,6 @@ import {
   ChevronDown,
   ChevronRight,
   Circle,
-  Clock3,
-  FilePlus2,
   Files,
   FileText,
   Folder,
@@ -25,25 +22,33 @@ import {
   MoreHorizontal,
   PanelLeftClose,
   Pencil,
-  Plus,
   Save,
+  ExternalLink,
   Search,
-  Settings,
-  UserCircle,
   X,
 } from "lucide-react";
 import DecisionSearch from "../components/DecisionSearch";
-
+import {
+  DEFAULT_PROJECT_ID,
+  DEFAULT_PROJECT_NAME,
+  createLocalProject,
+  loadActiveProjectId,
+  loadProjectFolders,
+  loadProjects,
+  saveAllProjectRecords,
+  saveProjectFolderIndex,
+  saveProjectRecord,
+  setActiveProjectId,
+  type ProjectInfo,
+} from "../lib/projectStorage";
 type DecisionStatus = "採用" | "検討中" | "見送り";
 type ActivePanel = "explorer" | "search";
-
 type DecisionOption = {
   title: string;
   description: string;
   proposedBy: string;
   selected: boolean;
 };
-
 type DecisionRecord = {
   id: string;
   title: string;
@@ -56,14 +61,13 @@ type DecisionRecord = {
   decision: string;
   reason: string;
   tradeoff: string;
+  urls?: string[];
 };
-
 type FolderGroup = {
   id: string;
   name: string;
   records: DecisionRecord[];
 };
-
 type ContextMenuState =
   | {
       type: "folder";
@@ -77,7 +81,6 @@ type ContextMenuState =
       x: number;
       y: number;
     };
-
 type EditingState =
   | {
       type: "folder";
@@ -89,12 +92,10 @@ type EditingState =
       id: string;
       value: string;
     };
-
 const DEFAULT_SIDEBAR_WIDTH = 292;
 const MIN_SIDEBAR_WIDTH = 180;
 const MAX_SIDEBAR_WIDTH = 480;
 const SIDEBAR_STORAGE_KEY = "decision-note-sidebar-width";
-
 const initialFolders: FolderGroup[] = [
   {
     id: "technical-selection",
@@ -349,21 +350,18 @@ const initialFolders: FolderGroup[] = [
     ],
   },
 ];
-
 function clampSidebarWidth(width: number) {
   return Math.min(
     MAX_SIDEBAR_WIDTH,
     Math.max(MIN_SIDEBAR_WIDTH, width),
   );
 }
-
 function StatusBadge({ status }: { status: DecisionStatus }) {
   const styles: Record<DecisionStatus, string> = {
     採用: "border-emerald-200 bg-emerald-50 text-emerald-700",
     検討中: "border-amber-200 bg-amber-50 text-amber-700",
     見送り: "border-slate-300 bg-slate-100 text-slate-600",
   };
-
   return (
     <span
       className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${styles[status]}`}
@@ -373,13 +371,14 @@ function StatusBadge({ status }: { status: DecisionStatus }) {
     </span>
   );
 }
-
 function OptionCard({
   option,
   number,
+  onDescriptionChange,
 }: {
   option: DecisionOption;
   number: number;
+  onDescriptionChange: (value: string) => void;
 }) {
   return (
     <div
@@ -395,7 +394,6 @@ function OptionCard({
           採用
         </span>
       )}
-
       <div className="flex items-start gap-3">
         <div
           className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full ${
@@ -414,18 +412,15 @@ function OptionCard({
             />
           )}
         </div>
-
         <div className="min-w-0 flex-1 pr-14">
           <div className="flex flex-wrap items-center gap-2">
             <span className="font-mono text-[10px] text-slate-400">
               OPTION {String(number).padStart(2, "0")}
             </span>
-
             <span className="rounded bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-500">
               {option.proposedBy}
             </span>
           </div>
-
           <h3
             className={`mt-2 text-[15px] font-semibold ${
               option.selected
@@ -435,16 +430,14 @@ function OptionCard({
           >
             {option.title}
           </h3>
-
-          <p className="mt-2 text-sm leading-6 text-slate-500">
-            {option.description}
-          </p>
+          <textarea value={option.description} onChange={(event) => onDescriptionChange(event.target.value)}
+            aria-label={`選択肢 ${number} の内容`}
+            className="mt-2 min-h-20 w-full resize-y rounded border border-slate-200 bg-white p-2 text-sm leading-6 text-slate-600" />
         </div>
       </div>
     </div>
   );
 }
-
 function StepNumber({
   number,
   active = false,
@@ -464,13 +457,11 @@ function StepNumber({
     </div>
   );
 }
-
 function StepLine() {
   return (
     <div className="absolute bottom-[-48px] left-[13px] top-8 w-px bg-slate-200" />
   );
 }
-
 function SectionLabel({
   children,
   active = false,
@@ -488,7 +479,6 @@ function SectionLabel({
     </p>
   );
 }
-
 function SectionTitle({ children }: { children: ReactNode }) {
   return (
     <h2 className="mt-2 text-xl font-bold text-slate-900">
@@ -496,36 +486,39 @@ function SectionTitle({ children }: { children: ReactNode }) {
     </h2>
   );
 }
-
 export default function Home() {
   const [folders, setFolders] =
     useState<FolderGroup[]>(initialFolders);
-
   const allRecords = useMemo(
     () => folders.flatMap((folder) => folder.records),
     [folders],
   );
-
   const [selectedId, setSelectedId] = useState<string | null>(
     "firebase-adoption",
   );
-
   const [openTabIds, setOpenTabIds] = useState<string[]>([
     "firebase-adoption",
   ]);
-
   const [dirtyIds, setDirtyIds] = useState<Set<string>>(
     () => new Set(),
   );
-
+  const [storageError, setStorageError] = useState(false);
+  const [savedRecordIds, setSavedRecordIds] = useState<Set<string>>(() => new Set());
+  const [lastSavedId, setLastSavedId] = useState<string | null>(null);
+  const [lastSavedAll, setLastSavedAll] = useState(false);
+  const [projects, setProjects] = useState<ProjectInfo[]>([
+    { id: DEFAULT_PROJECT_ID, name: DEFAULT_PROJECT_NAME },
+  ]);
+  const [activeProjectId, setActiveProject] = useState(DEFAULT_PROJECT_ID);
+  const [isOpenDialogVisible, setIsOpenDialogVisible] = useState(false);
+  const [openQuery, setOpenQuery] = useState("");
+  const [newProjectName, setNewProjectName] = useState("");
+  const openInputRef = useRef<HTMLInputElement>(null);
   const [draggedTabId, setDraggedTabId] =
     useState<string | null>(null);
-
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-
   const [activePanel, setActivePanel] =
     useState<ActivePanel>("explorer");
-
   const [openFolders, setOpenFolders] = useState<
     Record<string, boolean>
   >({
@@ -533,30 +526,22 @@ export default function Home() {
     "screen-design": true,
     rejected: true,
   });
-
   const [contextMenu, setContextMenu] =
     useState<ContextMenuState | null>(null);
-
   const [editing, setEditing] =
     useState<EditingState | null>(null);
-
   const [sidebarWidth, setSidebarWidth] = useState(
     DEFAULT_SIDEBAR_WIDTH,
   );
-
   const [isResizing, setIsResizing] = useState(false);
-
   const resizeStartRef = useRef({
     x: 0,
     width: DEFAULT_SIDEBAR_WIDTH,
   });
-
   const sidebarWidthRef = useRef(DEFAULT_SIDEBAR_WIDTH);
-
   const selectedRecord =
     allRecords.find((record) => record.id === selectedId) ??
     null;
-
   const openTabs = openTabIds
     .map((id) =>
       allRecords.find((record) => record.id === id),
@@ -565,80 +550,110 @@ export default function Home() {
       (record): record is DecisionRecord =>
         record !== undefined,
     );
-
+  const openResults = useMemo(() => {
+    const query = openQuery.trim().toLocaleLowerCase();
+    return query
+      ? projects.filter((project) => project.name.toLocaleLowerCase().includes(query))
+      : projects;
+  }, [projects, openQuery]);
+  const activeProjectName = projects.find((project) => project.id === activeProjectId)?.name ?? DEFAULT_PROJECT_NAME;
+  useEffect(() => {
+    const frameId = window.requestAnimationFrame(() => {
+      try {
+        const available = loadProjects(window.localStorage);
+        const requestedId = loadActiveProjectId(window.localStorage);
+        const projectId = available.some((project) => project.id === requestedId)
+          ? requestedId : DEFAULT_PROJECT_ID;
+        const saved = loadProjectFolders(window.localStorage, projectId, initialFolders);
+        setProjects(available);
+        setActiveProject(projectId);
+        setFolders(saved.folders);
+        setSavedRecordIds(saved.savedIds);
+        if (projectId !== DEFAULT_PROJECT_ID) {
+          setSelectedId(null);
+          setOpenTabIds([]);
+        }
+      } catch {
+        setStorageError(true);
+      }
+    });
+    return () => window.cancelAnimationFrame(frameId);
+  }, []);
+  useEffect(() => {
+    if (isOpenDialogVisible) openInputRef.current?.focus();
+  }, [isOpenDialogVisible]);
+  useEffect(() => {
+    if (!isOpenDialogVisible) return;
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setIsOpenDialogVisible(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [isOpenDialogVisible]);
+  useEffect(() => {
+    if (dirtyIds.size === 0) return;
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [dirtyIds.size]);
   useEffect(() => {
     const frameId = window.requestAnimationFrame(() => {
       const storedWidth = window.localStorage.getItem(
         SIDEBAR_STORAGE_KEY,
       );
-
       if (!storedWidth) {
         return;
       }
-
       const parsedWidth = Number(storedWidth);
-
       if (Number.isNaN(parsedWidth)) {
         return;
       }
-
       const nextWidth = clampSidebarWidth(parsedWidth);
-
       sidebarWidthRef.current = nextWidth;
-
       setSidebarWidth((currentWidth) => {
         if (currentWidth === nextWidth) {
           return currentWidth;
         }
-
         return nextWidth;
       });
     });
-
     return () => {
       window.cancelAnimationFrame(frameId);
     };
   }, []);
-
   useEffect(() => {
     if (!isResizing) {
       return;
     }
-
     const handlePointerMove = (event: PointerEvent) => {
       const difference =
         event.clientX - resizeStartRef.current.x;
-
       const nextWidth = clampSidebarWidth(
         resizeStartRef.current.width + difference,
       );
-
       sidebarWidthRef.current = nextWidth;
       setSidebarWidth(nextWidth);
     };
-
     const handlePointerUp = () => {
       setIsResizing(false);
-
       window.localStorage.setItem(
         SIDEBAR_STORAGE_KEY,
         String(sidebarWidthRef.current),
       );
     };
-
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
-
     window.addEventListener(
       "pointermove",
       handlePointerMove,
     );
     window.addEventListener("pointerup", handlePointerUp);
-
     return () => {
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
-
       window.removeEventListener(
         "pointermove",
         handlePointerMove,
@@ -649,15 +664,12 @@ export default function Home() {
       );
     };
   }, [isResizing]);
-
   useEffect(() => {
     const closeContextMenu = () => {
       setContextMenu(null);
     };
-
     window.addEventListener("click", closeContextMenu);
     window.addEventListener("resize", closeContextMenu);
-
     return () => {
       window.removeEventListener(
         "click",
@@ -669,63 +681,50 @@ export default function Home() {
       );
     };
   }, []);
-
   const showExplorer = useCallback(() => {
     setIsSidebarOpen(true);
     setActivePanel("explorer");
   }, []);
-
   const toggleExplorer = useCallback(() => {
     if (isSidebarOpen && activePanel === "explorer") {
       setIsSidebarOpen(false);
       return;
     }
-
     setActivePanel("explorer");
     setIsSidebarOpen(true);
   }, [activePanel, isSidebarOpen]);
-
   const toggleSearch = useCallback(() => {
     if (isSidebarOpen && activePanel === "search") {
       setIsSidebarOpen(false);
       return;
     }
-
     setActivePanel("search");
     setIsSidebarOpen(true);
   }, [activePanel, isSidebarOpen]);
-
   const openRecord = useCallback((id: string) => {
     setOpenTabIds((previous) =>
       previous.includes(id)
         ? previous
         : [...previous, id],
     );
-
     setSelectedId(id);
   }, []);
-
   const closeTab = (id: string) => {
     setOpenTabIds((previous) => {
       const closingIndex = previous.indexOf(id);
-
       const nextTabs = previous.filter(
         (tabId) => tabId !== id,
       );
-
       if (selectedId === id) {
         const nextSelectedId =
           nextTabs[
             Math.min(closingIndex, nextTabs.length - 1)
           ] ?? null;
-
         setSelectedId(nextSelectedId);
       }
-
       return nextTabs;
     });
   };
-
   const reorderTabs = (
     draggedId: string,
     targetId: string,
@@ -733,131 +732,204 @@ export default function Home() {
     if (draggedId === targetId) {
       return;
     }
-
     setOpenTabIds((previous) => {
       const nextTabs = [...previous];
       const draggedIndex = nextTabs.indexOf(draggedId);
       const targetIndex = nextTabs.indexOf(targetId);
-
       if (draggedIndex === -1 || targetIndex === -1) {
         return previous;
       }
-
       nextTabs.splice(draggedIndex, 1);
       nextTabs.splice(targetIndex, 0, draggedId);
-
       return nextTabs;
     });
   };
-
   const toggleFolder = (folderId: string) => {
     setOpenFolders((previous) => ({
       ...previous,
       [folderId]: !previous[folderId],
     }));
   };
-
   const markDirty = (recordIds: string[]) => {
+    setLastSavedId(null);
+    setLastSavedAll(false);
+    setStorageError(false);
     setDirtyIds((previous) => {
       const next = new Set(previous);
-
       recordIds.forEach((id) => {
         next.add(id);
       });
-
       return next;
     });
   };
-
-  const saveRecord = (recordId: string) => {
+  const saveRecord = useCallback((recordId: string | null) => {
+    if (!recordId) return;
+    try {
+      saveProjectRecord(window.localStorage, activeProjectId, folders, recordId);
+      setStorageError(false);
+      setSavedRecordIds((previous) => new Set(previous).add(recordId));
+      setLastSavedId(recordId);
+      setLastSavedAll(false);
+    } catch {
+      setStorageError(true);
+      return;
+    }
     setDirtyIds((previous) => {
       const next = new Set(previous);
       next.delete(recordId);
       return next;
     });
+  }, [folders, activeProjectId]);
+  const saveAll = useCallback((): boolean => {
+    if (dirtyIds.size === 0) return true;
+    try {
+      saveAllProjectRecords(window.localStorage, activeProjectId, folders, dirtyIds);
+      setSavedRecordIds((previous) => new Set([...previous, ...dirtyIds]));
+      setDirtyIds(new Set());
+      setLastSavedId(null);
+      setLastSavedAll(true);
+      setStorageError(false);
+      return true;
+    } catch {
+      setStorageError(true);
+      return false;
+    }
+  }, [activeProjectId, dirtyIds, folders]);
+  const openProject = useCallback((projectId: string) => {
+    if (projectId === activeProjectId) {
+      setIsOpenDialogVisible(false);
+      return;
+    }
+    if (dirtyIds.size > 0 && !saveAll()) return;
+    try {
+      const saved = loadProjectFolders(window.localStorage, projectId, initialFolders);
+      setActiveProjectId(window.localStorage, projectId);
+      setFolders(saved.folders);
+      setSavedRecordIds(saved.savedIds);
+      setOpenFolders(Object.fromEntries(saved.folders.map((folder) => [folder.id, true])));
+      setActiveProject(projectId);
+      setSelectedId(null);
+      setOpenTabIds([]);
+      setDirtyIds(new Set());
+      setLastSavedId(null);
+      setLastSavedAll(false);
+      setStorageError(false);
+      setIsOpenDialogVisible(false);
+      setActivePanel("explorer");
+      setIsSidebarOpen(true);
+    } catch {
+      setStorageError(true);
+    }
+  }, [activeProjectId, dirtyIds.size, saveAll]);
+  const addProject = () => {
+    try {
+      if (dirtyIds.size > 0 && !saveAll()) return;
+      const name = newProjectName.trim();
+      const category = "判断記録";
+      const project = createLocalProject(window.localStorage, name, [{
+        id: crypto.randomUUID(),
+        name: category,
+        records: [{
+          id: crypto.randomUUID(), title: "新しい判断", project: name,
+          category, status: "検討中", updatedAt: new Date().toLocaleDateString("ja-JP"), background: "",
+          options: [], decision: "", reason: "", tradeoff: "", urls: [],
+        }],
+      }]);
+      setProjects((previous) => [...previous, project]);
+      setNewProjectName("");
+      openProject(project.id);
+    } catch {
+      setStorageError(true);
+    }
   };
-
+  const updateRecord = (recordId: string, changes: Partial<DecisionRecord>) => {
+    setFolders((previous) => previous.map((folder) => ({
+      ...folder,
+      records: folder.records.map((record) => record.id === recordId
+        ? { ...record, ...changes }
+        : record),
+    })));
+    markDirty([recordId]);
+  };
+  useEffect(() => {
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        saveRecord(selectedId);
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "o") {
+        event.preventDefault();
+        setOpenQuery("");
+        setIsOpenDialogVisible(true);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [saveRecord, selectedId]);
   const beginFolderRename = (folderId: string) => {
     const folder = folders.find(
       (item) => item.id === folderId,
     );
-
     if (!folder) {
       return;
     }
-
     setEditing({
       type: "folder",
       id: folder.id,
       value: folder.name,
     });
-
     setContextMenu(null);
   };
-
   const beginRecordRename = (recordId: string) => {
     const record = allRecords.find(
       (item) => item.id === recordId,
     );
-
     if (!record) {
       return;
     }
-
     setEditing({
       type: "record",
       id: record.id,
       value: record.title,
     });
-
     openRecord(record.id);
     setContextMenu(null);
   };
-
   const commitRename = () => {
     if (!editing) {
       return;
     }
-
     const nextValue = editing.value.trim();
-
     if (!nextValue) {
       setEditing(null);
       return;
     }
-
     if (editing.type === "folder") {
       const targetFolder = folders.find(
         (folder) => folder.id === editing.id,
       );
-
       if (!targetFolder) {
         setEditing(null);
         return;
       }
-
-      setFolders((previous) =>
-        previous.map((folder) => {
-          if (folder.id !== editing.id) {
-            return folder;
-          }
-
-          return {
-            ...folder,
-            name: nextValue,
-            records: folder.records.map((record) => ({
-              ...record,
-              category: nextValue,
-            })),
-          };
-        }),
-      );
-
-      markDirty(
-        targetFolder.records.map((record) => record.id),
-      );
+      if (targetFolder.name !== nextValue) {
+        const nextFolders = folders.map((folder) => folder.id === editing.id
+          ? {
+              ...folder,
+              name: nextValue,
+              records: folder.records.map((record) => ({ ...record, category: nextValue })),
+            }
+          : folder);
+        try {
+          saveProjectFolderIndex(window.localStorage, activeProjectId, nextFolders);
+          setFolders(nextFolders);
+          setStorageError(false);
+          setLastSavedId(null);
+        } catch {
+          setStorageError(true);
+        }
+      }
     }
-
     if (editing.type === "record") {
       setFolders((previous) =>
         previous.map((folder) => ({
@@ -872,20 +944,16 @@ export default function Home() {
           ),
         })),
       );
-
       markDirty([editing.id]);
     }
-
     setEditing(null);
   };
-
   const openFolderContextMenu = (
     event: ReactMouseEvent,
     folderId: string,
   ) => {
     event.preventDefault();
     event.stopPropagation();
-
     setContextMenu({
       type: "folder",
       id: folderId,
@@ -893,14 +961,12 @@ export default function Home() {
       y: Math.min(event.clientY, window.innerHeight - 100),
     });
   };
-
   const openRecordContextMenu = (
     event: ReactMouseEvent,
     recordId: string,
   ) => {
     event.preventDefault();
     event.stopPropagation();
-
     setContextMenu({
       type: "record",
       id: recordId,
@@ -908,46 +974,37 @@ export default function Home() {
       y: Math.min(event.clientY, window.innerHeight - 140),
     });
   };
-
   const beginSidebarResize = (
     event: ReactPointerEvent<HTMLDivElement>,
   ) => {
     event.preventDefault();
-
     resizeStartRef.current = {
       x: event.clientX,
       width: sidebarWidth,
     };
-
     setIsResizing(true);
   };
-
   const resetSidebarWidth = () => {
     sidebarWidthRef.current = DEFAULT_SIDEBAR_WIDTH;
     setSidebarWidth(DEFAULT_SIDEBAR_WIDTH);
-
     window.localStorage.setItem(
       SIDEBAR_STORAGE_KEY,
       String(DEFAULT_SIDEBAR_WIDTH),
     );
   };
-
   const changeSidebarWidthByKeyboard = (
     difference: number,
   ) => {
     const nextWidth = clampSidebarWidth(
       sidebarWidthRef.current + difference,
     );
-
     sidebarWidthRef.current = nextWidth;
     setSidebarWidth(nextWidth);
-
     window.localStorage.setItem(
       SIDEBAR_STORAGE_KEY,
       String(nextWidth),
     );
   };
-
   const handleRenameKeyDown = (
     event: ReactKeyboardEvent<HTMLInputElement>,
   ) => {
@@ -955,13 +1012,11 @@ export default function Home() {
       event.preventDefault();
       commitRename();
     }
-
     if (event.key === "Escape") {
       event.preventDefault();
       setEditing(null);
     }
   };
-
   return (
     <div className="flex h-screen overflow-hidden bg-white text-slate-900">
       {/* Activity Bar */}
@@ -971,7 +1026,6 @@ export default function Home() {
             D
           </div>
         </div>
-
         <nav className="flex flex-1 flex-col items-center py-1">
           <button
             type="button"
@@ -991,10 +1045,8 @@ export default function Home() {
               isSidebarOpen && (
                 <span className="absolute inset-y-1.5 left-0 w-0.5 rounded-r bg-indigo-400" />
               )}
-
             <Files size={22} strokeWidth={1.7} />
           </button>
-
           <button
             type="button"
             onClick={toggleSearch}
@@ -1013,38 +1065,10 @@ export default function Home() {
               isSidebarOpen && (
                 <span className="absolute inset-y-1.5 left-0 w-0.5 rounded-r bg-indigo-400" />
               )}
-
             <Search size={22} strokeWidth={1.7} />
           </button>
-
-          <button
-            type="button"
-            className="flex h-12 w-full items-center justify-center transition hover:bg-white/5 hover:text-white"
-            title="判断履歴"
-          >
-            <Clock3 size={21} strokeWidth={1.7} />
-          </button>
         </nav>
-
-        <div className="flex flex-col border-t border-[#2b2d30] py-1">
-          <button
-            type="button"
-            className="flex h-11 items-center justify-center transition hover:bg-white/5 hover:text-white"
-            title="アカウント"
-          >
-            <UserCircle size={21} strokeWidth={1.7} />
-          </button>
-
-          <button
-            type="button"
-            className="flex h-11 items-center justify-center transition hover:bg-white/5 hover:text-white"
-            title="設定"
-          >
-            <Settings size={21} strokeWidth={1.7} />
-          </button>
-        </div>
       </aside>
-
       {/* Resizable Sidebar */}
       {isSidebarOpen && (
         <div
@@ -1057,64 +1081,40 @@ export default function Home() {
                 <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-600">
                   Explorer
                 </span>
-
-                <div className="flex items-center gap-0.5">
-                  <button
-                    type="button"
-                    className="flex h-7 w-7 items-center justify-center rounded text-slate-500 hover:bg-slate-200"
-                    title="新しい判断"
-                  >
-                    <FilePlus2 size={16} />
-                  </button>
-
-                  <button
-                    type="button"
-                    className="flex h-7 w-7 items-center justify-center rounded text-slate-500 hover:bg-slate-200"
-                    title="新しいフォルダ"
-                  >
-                    <Folder size={16} />
-                  </button>
-
-                  <button
-                    type="button"
-                    className="flex h-7 w-7 items-center justify-center rounded text-slate-500 hover:bg-slate-200"
-                    title="その他"
-                  >
-                    <MoreHorizontal size={17} />
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOpenQuery("");
+                    setIsOpenDialogVisible(true);
+                  }}
+                  className="rounded px-2 py-1 text-xs font-medium text-indigo-700 hover:bg-indigo-50"
+                  title="プロジェクトを開く（Ctrl+O）"
+                >
+                  プロジェクトを開く
+                </button>
               </div>
-
               <div className="flex h-9 shrink-0 items-center border-b border-[#e5e7eb] px-2">
                 <ChevronDown
                   size={14}
                   className="mr-1 text-slate-500"
                 />
-
-                <span className="truncate text-xs font-semibold uppercase tracking-wide text-slate-700">
-                  Decision Note
+                <span className={`truncate text-xs font-semibold uppercase tracking-wide ${dirtyIds.size > 0 ? "text-red-700" : "text-slate-700"}`}>
+                  {activeProjectName}
                 </span>
+                {dirtyIds.size > 0 && (
+                  <span className="ml-auto shrink-0 rounded bg-red-50 px-1.5 py-0.5 text-[10px] font-semibold text-red-700" title="プロジェクト内の未保存の記録数">
+                    未保存 {dirtyIds.size}
+                  </span>
+                )}
               </div>
-
-              <div className="px-3 pb-2 pt-3">
-                <button
-                  type="button"
-                  className="flex w-full items-center justify-center gap-2 rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white shadow-sm hover:bg-indigo-700"
-                >
-                  <Plus size={16} />
-                  新しい判断
-                </button>
-              </div>
-
               <nav className="flex-1 overflow-y-auto pb-3 pt-1">
                 {folders.map((folder) => {
                   const isFolderOpen =
                     openFolders[folder.id];
-
+                  const unsavedCount = folder.records.filter((record) => dirtyIds.has(record.id)).length;
                   const isEditingFolder =
                     editing?.type === "folder" &&
                     editing.id === folder.id;
-
                   return (
                     <div key={folder.id}>
                       <div
@@ -1145,7 +1145,6 @@ export default function Home() {
                             />
                           )}
                         </button>
-
                         {isFolderOpen ? (
                           <FolderOpen
                             size={15}
@@ -1157,7 +1156,6 @@ export default function Home() {
                             className="mr-1.5 shrink-0 text-amber-500"
                           />
                         )}
-
                         {isEditingFolder ? (
                           <input
                             autoFocus
@@ -1179,27 +1177,25 @@ export default function Home() {
                               onClick={() =>
                                 toggleFolder(folder.id)
                               }
-                              className="min-w-0 flex-1 truncate text-left text-xs font-medium text-slate-700"
+                              className={`min-w-0 flex-1 truncate text-left text-xs font-medium ${unsavedCount > 0 ? "text-red-700" : "text-slate-700"}`}
+                              title={unsavedCount > 0 ? `未保存の記録が${unsavedCount}件あります` : folder.name}
                             >
                               {folder.name}
                             </button>
-
-                            <span className="ml-2 mr-2 text-[10px] text-slate-400">
-                              {folder.records.length}
+                            <span className={`ml-2 mr-2 text-[10px] ${unsavedCount > 0 ? "font-semibold text-red-700" : "text-slate-400"}`}>
+                              {unsavedCount > 0 ? `未保存 ${unsavedCount}` : folder.records.length}
                             </span>
                           </>
                         )}
                       </div>
-
                       {isFolderOpen &&
                         folder.records.map((record) => {
                           const isSelected =
                             record.id === selectedId;
-
+                          const isDirty = dirtyIds.has(record.id);
                           const isEditingRecord =
                             editing?.type === "record" &&
                             editing.id === record.id;
-
                           return (
                             <div
                               key={record.id}
@@ -1218,16 +1214,16 @@ export default function Home() {
                               {isSelected && (
                                 <span className="absolute inset-y-0 left-0 w-0.5 bg-indigo-600" />
                               )}
-
                               <FileText
                                 size={14}
                                 className={`mr-2 shrink-0 ${
-                                  isSelected
+                                  isDirty
+                                    ? "text-red-600"
+                                    : isSelected
                                     ? "text-indigo-600"
                                     : "text-slate-400"
                                 }`}
                               />
-
                               {isEditingRecord ? (
                                 <input
                                   autoFocus
@@ -1251,7 +1247,8 @@ export default function Home() {
                                   onClick={() =>
                                     openRecord(record.id)
                                   }
-                                  className="min-w-0 flex-1 truncate py-2 text-left"
+                                  className={`min-w-0 flex-1 truncate py-2 text-left ${isDirty ? "font-semibold text-red-700" : ""}`}
+                                  title={isDirty ? `${record.title}（未保存）` : record.title}
                                 >
                                   {record.title}
                                 </button>
@@ -1263,10 +1260,8 @@ export default function Home() {
                   );
                 })}
               </nav>
-
               <div className="flex h-8 shrink-0 items-center justify-between border-t border-[#dfe1e5] px-3 text-[10px] text-slate-500">
-                <span>{allRecords.length} decisions</span>
-
+                <span>{allRecords.length} decisions{dirtyIds.size > 0 ? ` · 未保存 ${dirtyIds.size}件` : ""}</span>
                 <button
                   type="button"
                   onClick={() => setIsSidebarOpen(false)}
@@ -1286,7 +1281,6 @@ export default function Home() {
               onClose={() => setIsSidebarOpen(false)}
             />
           )}
-
           <div
             role="separator"
             aria-label="サイドバーの幅を変更"
@@ -1298,7 +1292,6 @@ export default function Home() {
               if (event.key === "ArrowLeft") {
                 changeSidebarWidthByKeyboard(-16);
               }
-
               if (event.key === "ArrowRight") {
                 changeSidebarWidthByKeyboard(16);
               }
@@ -1312,7 +1305,6 @@ export default function Home() {
           />
         </div>
       )}
-
       {/* Main */}
       <main className="flex min-w-0 flex-1 flex-col bg-white">
         {/* Tabs */}
@@ -1320,7 +1312,6 @@ export default function Home() {
           {openTabs.map((record) => {
             const isActive = record.id === selectedId;
             const isDirty = dirtyIds.has(record.id);
-
             return (
               <div
                 key={record.id}
@@ -1339,7 +1330,6 @@ export default function Home() {
                       record.id,
                     );
                   }
-
                   setDraggedTabId(null);
                 }}
                 onClick={() => setSelectedId(record.id)}
@@ -1357,18 +1347,15 @@ export default function Home() {
                   size={14}
                   className="mr-2 shrink-0 text-indigo-500"
                 />
-
                 <span className="min-w-0 flex-1 truncate text-xs text-slate-700">
                   {record.title}
                 </span>
-
                 {isDirty && (
                   <span
                     className="ml-2 h-2 w-2 shrink-0 rounded-full bg-slate-600"
                     title="未保存"
                   />
                 )}
-
                 <button
                   type="button"
                   onClick={(event) => {
@@ -1384,60 +1371,73 @@ export default function Home() {
             );
           })}
         </div>
-
         {selectedRecord ? (
           <>
             <header className="flex h-[52px] shrink-0 items-center justify-between border-b border-slate-200 px-5">
               <div className="flex min-w-0 items-center gap-2 overflow-hidden text-sm text-slate-500">
                 <span className="shrink-0">
-                  {selectedRecord.project}
+                  {activeProjectName}
                 </span>
-
                 <span className="shrink-0 text-slate-300">
                   /
                 </span>
-
                 <span className="shrink-0">
                   {selectedRecord.category}
                 </span>
-
                 <span className="shrink-0 text-slate-300">
                   /
                 </span>
-
                 <span className="truncate font-medium text-slate-700">
                   {selectedRecord.title}
                 </span>
               </div>
-
               <div className="ml-3 flex shrink-0 items-center gap-2">
-                {dirtyIds.has(selectedRecord.id) ? (
-                  <span className="hidden text-xs text-amber-600 lg:block">
-                    ● 未保存
-                  </span>
-                ) : (
-                  <span className="hidden text-xs text-slate-400 lg:block">
-                    ✓ 保存済み
-                  </span>
-                )}
-
+                <span
+                  role={storageError ? "alert" : "status"}
+                  className={`hidden rounded-md px-2.5 py-1.5 text-xs font-medium lg:inline-flex ${
+                    storageError
+                      ? "bg-red-50 text-red-700"
+                      : dirtyIds.has(selectedRecord.id)
+                        ? "bg-amber-50 text-amber-700"
+                        : lastSavedId === selectedRecord.id || lastSavedAll
+                          ? "bg-emerald-50 text-emerald-700"
+                          : "bg-slate-100 text-slate-500"
+                  }`}
+                >
+                  {storageError
+                    ? "保存に失敗しました"
+                    : dirtyIds.has(selectedRecord.id)
+                      ? "● この記録は未保存"
+                      : lastSavedId === selectedRecord.id || lastSavedAll
+                        ? "✓ 保存しました"
+                        : savedRecordIds.has(selectedRecord.id)
+                          ? "✓ この端末に保存済み"
+                          : "未保存のサンプル"}
+                </span>
+                {dirtyIds.size > 0 && <span className="hidden text-xs text-amber-700 xl:inline">計{dirtyIds.size}件未保存</span>}
                 <button
                   type="button"
-                  disabled={
-                    !dirtyIds.has(selectedRecord.id)
-                  }
-                  onClick={() =>
-                    saveRecord(selectedRecord.id)
-                  }
-                  className="flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+                  title="この記録を保存（Ctrl+S）"
+                  disabled={!dirtyIds.has(selectedRecord.id) && savedRecordIds.has(selectedRecord.id) && !storageError}
+                  onClick={() => saveRecord(selectedRecord.id)}
+                  className="flex h-9 items-center gap-2 rounded-md bg-indigo-600 px-3 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400 disabled:shadow-none"
                 >
                   <Save size={15} />
-
-                  <span className="hidden sm:inline">
-                    保存
-                  </span>
+                  <span>この記録を保存</span>
+                  <kbd className="hidden rounded border border-white/30 px-1.5 py-0.5 text-[10px] font-normal leading-none md:inline-block">
+                    Ctrl+S
+                  </kbd>
                 </button>
-
+                <button
+                  type="button"
+                  title="未保存の記録をすべて保存"
+                  disabled={dirtyIds.size === 0}
+                  onClick={saveAll}
+                  className="flex h-9 items-center gap-2 rounded-md border border-indigo-300 bg-white px-3 text-sm font-semibold text-indigo-700 transition hover:bg-indigo-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
+                >
+                  <Save size={15} />
+                  <span>すべて保存{dirtyIds.size > 0 ? ` (${dirtyIds.size})` : ""}</span>
+                </button>
                 <button
                   type="button"
                   onClick={(event) =>
@@ -1453,7 +1453,6 @@ export default function Home() {
                 </button>
               </div>
             </header>
-
             <div className="flex-1 overflow-y-auto">
               <article className="mx-auto w-full max-w-[920px] px-5 pb-24 pt-10 sm:px-10">
                 <div className="border-b border-slate-200 pb-9">
@@ -1462,16 +1461,13 @@ export default function Home() {
                       status={selectedRecord.status}
                     />
                   </div>
-
                   <h1 className="max-w-3xl text-2xl font-bold tracking-[-0.03em] text-slate-950 sm:text-[38px]">
                     {selectedRecord.title}
                   </h1>
-
                   <p className="mt-4 max-w-2xl leading-7 text-slate-500">
                     選択肢を比較し、なぜその方法を選んだのか。
                     判断の過程まで残して、未来の自分が振り返れるようにする。
                   </p>
-
                   <div className="mt-7 flex flex-wrap gap-x-6 gap-y-2 text-xs text-slate-400">
                     <span>
                       Project
@@ -1479,14 +1475,12 @@ export default function Home() {
                         {selectedRecord.project}
                       </strong>
                     </span>
-
                     <span>
                       Category
                       <strong className="ml-2 font-medium text-slate-600">
                         {selectedRecord.category}
                       </strong>
                     </span>
-
                     <span>
                       Updated
                       <strong className="ml-2 font-medium text-slate-600">
@@ -1495,18 +1489,15 @@ export default function Home() {
                     </span>
                   </div>
                 </div>
-
                 <section className="relative mt-12 pl-10">
                   <StepNumber number="01" />
                   <StepLine />
                   <SectionLabel>Context</SectionLabel>
                   <SectionTitle>課題・背景</SectionTitle>
-
-                  <p className="mt-4 text-[15px] leading-8 text-slate-600">
-                    {selectedRecord.background}
-                  </p>
+                  <textarea aria-label="課題・背景" value={selectedRecord.background}
+                    onChange={(event) => updateRecord(selectedRecord.id, { background: event.target.value })}
+                    className="mt-4 min-h-32 w-full resize-y rounded-lg border border-slate-200 p-3 text-[15px] leading-8 text-slate-600 focus:border-indigo-400 focus:outline-none" />
                 </section>
-
                 <section className="relative mt-12 pl-10">
                   <StepNumber number="02" />
                   <StepLine />
@@ -1514,7 +1505,6 @@ export default function Home() {
                   <SectionTitle>
                     検討した選択肢
                   </SectionTitle>
-
                   <div className="mt-5 space-y-3">
                     {selectedRecord.options.map(
                       (option, index) => (
@@ -1522,60 +1512,70 @@ export default function Home() {
                           key={`${selectedRecord.id}-${option.title}`}
                           option={option}
                           number={index + 1}
+                          onDescriptionChange={(value) => updateRecord(selectedRecord.id, {
+                            options: selectedRecord.options.map((item, itemIndex) => itemIndex === index
+                              ? { ...item, description: value }
+                              : item),
+                          })}
                         />
                       ),
                     )}
                   </div>
                 </section>
-
                 <section className="relative mt-12 pl-10">
                   <StepNumber number="03" active />
                   <StepLine />
-
                   <SectionLabel active>
                     Decision
                   </SectionLabel>
-
                   <SectionTitle>
                     最終的な決定
                   </SectionTitle>
-
                   <div className="mt-5 rounded-xl border border-indigo-200 bg-indigo-50/70 p-6">
-                    <p className="text-[15px] font-medium leading-8 text-slate-800">
-                      {selectedRecord.decision}
-                    </p>
+                    <textarea aria-label="最終的な決定" value={selectedRecord.decision}
+                      onChange={(event) => updateRecord(selectedRecord.id, { decision: event.target.value })}
+                      className="min-h-24 w-full resize-y rounded border border-indigo-200 bg-white p-2 text-[15px] leading-8 text-slate-800" />
                   </div>
                 </section>
-
                 <section className="relative mt-12 pl-10">
                   <StepNumber number="04" />
                   <StepLine />
                   <SectionLabel>Reason</SectionLabel>
-
                   <SectionTitle>
                     この方法を選んだ理由
                   </SectionTitle>
-
-                  <p className="mt-4 text-[15px] leading-8 text-slate-600">
-                    {selectedRecord.reason}
-                  </p>
+                  <textarea aria-label="この方法を選んだ理由" value={selectedRecord.reason}
+                    onChange={(event) => updateRecord(selectedRecord.id, { reason: event.target.value })}
+                    className="mt-4 min-h-32 w-full resize-y rounded-lg border border-slate-200 p-3 text-[15px] leading-8 text-slate-600" />
                 </section>
-
                 <section className="relative mt-12 pl-10">
                   <StepNumber number="05" />
                   <SectionLabel>
                     Trade-off
                   </SectionLabel>
-
                   <SectionTitle>
                     許容したデメリット
                   </SectionTitle>
-
                   <div className="mt-5 rounded-xl border border-slate-200 bg-slate-50 p-6">
-                    <p className="text-[15px] leading-8 text-slate-600">
-                      {selectedRecord.tradeoff}
-                    </p>
+                    <textarea aria-label="許容したデメリット" value={selectedRecord.tradeoff}
+                      onChange={(event) => updateRecord(selectedRecord.id, { tradeoff: event.target.value })}
+                      className="min-h-24 w-full resize-y rounded border border-slate-200 bg-white p-2 text-[15px] leading-8 text-slate-600" />
                   </div>
+                </section>
+                <section className="relative mt-12 pl-10">
+                  <SectionLabel>References</SectionLabel>
+                  <SectionTitle>参考URL</SectionTitle>
+                  {(selectedRecord.urls ?? []).map((url, index) => (
+                    <div key={index} className="mt-3 flex gap-2">
+                      <input aria-label={`参考URL ${index + 1}`} type="url" value={url}
+                        onChange={(event) => updateRecord(selectedRecord.id, { urls: (selectedRecord.urls ?? []).map((item, itemIndex) => itemIndex === index ? event.target.value : item) })}
+                        className="min-w-0 flex-1 rounded border border-slate-200 p-2 text-sm" placeholder="https://example.com" />
+                      {/^https?:\/\//i.test(url) && <a href={url} target="_blank" rel="noopener noreferrer" aria-label={`参考URL ${index + 1} を開く`} className="rounded border border-slate-200 p-2 text-indigo-600"><ExternalLink size={18} /></a>}
+                      <button type="button" aria-label={`参考URL ${index + 1} を削除`} onClick={() => updateRecord(selectedRecord.id, { urls: (selectedRecord.urls ?? []).filter((_, itemIndex) => itemIndex !== index) })} className="rounded border border-slate-200 p-2"><X size={18} /></button>
+                    </div>
+                  ))}
+                  <button type="button" onClick={() => updateRecord(selectedRecord.id, { urls: [...(selectedRecord.urls ?? []), ""] })}
+                    className="mt-3 rounded border border-slate-200 px-3 py-2 text-sm text-indigo-700">＋ URLを追加</button>
                 </section>
               </article>
             </div>
@@ -1588,28 +1588,115 @@ export default function Home() {
                 strokeWidth={1.2}
                 className="mx-auto text-slate-300"
               />
-
               <p className="mt-4 text-sm font-medium text-slate-600">
                 開いている判断はありません
               </p>
-
               <p className="mt-2 text-xs text-slate-400">
                 Explorerから判断記録を選択してください
               </p>
+              {dirtyIds.size > 0 && (
+                <button type="button" onClick={saveAll} className="mt-3 rounded-md border border-indigo-300 px-3 py-2 text-xs font-semibold text-indigo-700 hover:bg-indigo-50">
+                  未保存の記録をすべて保存 ({dirtyIds.size})
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  setOpenQuery("");
+                  setIsOpenDialogVisible(true);
+                }}
+                className="mt-5 rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700"
+              >
+                別のプロジェクトを開く
+              </button>
             </div>
           </div>
         )}
-
         <footer className="flex h-7 shrink-0 items-center justify-between bg-indigo-600 px-4 text-[11px] text-indigo-50">
-          <span>Decision Note</span>
-
+          <span>{activeProjectName}</span>
           <div className="flex items-center gap-4">
             <span>{openTabIds.length} open tabs</span>
             <span>{allRecords.length} records</span>
           </div>
         </footer>
       </main>
-
+      {isOpenDialogVisible && (
+        <div
+          className="fixed inset-0 z-50 flex items-start justify-center bg-slate-950/40 px-4 pt-[12vh]"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setIsOpenDialogVisible(false);
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="open-project-title"
+            className="w-full max-w-xl overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl"
+          >
+            <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
+              <h2 id="open-project-title" className="text-sm font-semibold text-slate-900">
+                プロジェクトを開く
+              </h2>
+              <button
+                type="button"
+                onClick={() => setIsOpenDialogVisible(false)}
+                className="rounded p-1 text-slate-500 hover:bg-slate-100"
+                aria-label="閉じる"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="border-b border-slate-100 p-4">
+              <input
+                ref={openInputRef}
+                value={openQuery}
+                onChange={(event) => setOpenQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") setIsOpenDialogVisible(false);
+                  if (event.key === "Enter" && openResults[0]) openProject(openResults[0].id);
+                }}
+                placeholder="プロジェクト名で検索"
+                aria-label="開くプロジェクトを検索"
+                className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+              />
+            </div>
+            <div className="max-h-80 overflow-y-auto py-1">
+              {openResults.length ? openResults.map((project) => (
+                <button
+                  key={project.id}
+                  type="button"
+                  onClick={() => openProject(project.id)}
+                  className="flex w-full items-start gap-3 px-5 py-3 text-left hover:bg-indigo-50"
+                >
+                  <FolderOpen size={16} className="mt-0.5 shrink-0 text-indigo-500" />
+                  <span className="min-w-0">
+                    <span className="block truncate text-sm font-medium text-slate-800">
+                      {project.name}
+                      {project.id === activeProjectId && <span className="ml-2 text-xs text-indigo-600">開いています</span>}
+                    </span>
+                  </span>
+                </button>
+              )) : (
+                <p className="px-5 py-8 text-center text-sm text-slate-500">
+                  該当するプロジェクトはありません
+                </p>
+              )}
+            </div>
+            <div className="border-t border-slate-100 px-5 py-3">
+              <p className="mb-2 text-xs text-slate-500">UI確認用の端末内プロジェクトです。Firebase の保存済みプロジェクト一覧は接続後に表示します。</p>
+              {storageError && <p role="alert" className="mb-2 text-xs font-medium text-red-700">保存または読み込みに失敗しました。プロジェクトは切り替えていません。</p>}
+              <div className="flex gap-2">
+                <input value={newProjectName} onChange={(event) => setNewProjectName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") addProject(); }} placeholder="新しいプロジェクト名" aria-label="新しいプロジェクト名" className="min-w-0 flex-1 rounded-md border border-slate-300 px-3 py-2 text-sm" />
+                <button type="button" onClick={addProject} disabled={!newProjectName.trim()} className="rounded-md bg-indigo-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50">作成して開く</button>
+              </div>
+            </div>
+            {dirtyIds.size > 0 && <p className="border-t border-amber-100 bg-amber-50 px-5 py-2 text-xs text-amber-800">切り替える前に未保存の{dirtyIds.size}件をすべて保存します。保存に失敗した場合は切り替えません。</p>}
+            <p className="border-t border-slate-100 px-5 py-2 text-xs text-slate-400">
+              Ctrl+O で開く・Esc で閉じる
+            </p>
+          </div>
+        </div>
+      )}
       {/* Context Menu */}
       {contextMenu && (
         <div
@@ -1633,7 +1720,6 @@ export default function Home() {
               タブで開く
             </button>
           )}
-
           <button
             type="button"
             onClick={() => {
